@@ -93,3 +93,5 @@ public:
     int m_bodyTrackingHasLegs = false;
     bool m_useSeparateHandTrackers = false;
 };
+
+inline Settings* Settings_Instance() { return &Settings::Instance(); }

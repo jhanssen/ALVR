@@ -11,13 +11,12 @@
 #include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <memory>
 
 #ifdef _WIN32
 #include "platform/win32/CEncoder.h"
 #elif __APPLE__
 #include "platform/macos/CEncoder.h"
-#else
-#include "platform/linux/CEncoder.h"
 #endif
 
 const vr::HmdMatrix34_t MATRIX_IDENTITY
@@ -66,14 +65,15 @@ Hmd::Hmd()
 
 Hmd::~Hmd() {
     Debug("Hmd::destructor");
+    ShutdownRuntime();
 
+#ifdef _WIN32
     if (m_encoder) {
         Debug("Hmd::~Hmd(): Stopping encoder...\n");
         m_encoder->Stop();
         m_encoder.reset();
     }
 
-#ifdef _WIN32
     if (m_D3DRender) {
         m_D3DRender->Shutdown();
         m_D3DRender.reset();
@@ -88,6 +88,14 @@ bool Hmd::activate() {
 
     SetOpenvrProps((void*)this, this->device_id);
 
+#if !defined(_WIN32) && !defined(__APPLE__)
+    // The property has no type suffix in the header, so the generated key
+    // enum cannot name it and it is set here instead of the props path.
+    vr_properties->SetBoolProperty(
+        this->prop_container, vr::Prop_Hmd_AllowsClientToControlTextureIndex, true
+    );
+#endif
+
     vr_properties->SetFloatProperty(
         this->prop_container,
         vr::Prop_DisplayFrequency_Float,
@@ -96,30 +104,12 @@ bool Hmd::activate() {
 
     vr::VRDriverInput()->CreateBooleanComponent(this->prop_container, "/proximity", &m_proximity);
 
-#ifdef _WIN32
     float originalIPD
         = vr::VRSettings()->GetFloat(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_IPD_Float);
     vr::VRSettings()->SetFloat(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_IPD_Float, 0.063);
-#endif
 
     HmdMatrix_SetIdentity(&m_eyeToHeadLeft);
     HmdMatrix_SetIdentity(&m_eyeToHeadRight);
-
-// Disable async reprojection on Linux. Windows interface uses IVRDriverDirectModeComponent
-// which never applies reprojection
-// Also Disable async reprojection on vulkan
-#ifndef _WIN32
-    vr::VRSettings()->SetBool(
-        vr::k_pch_SteamVR_Section,
-        vr::k_pch_SteamVR_EnableLinuxVulkanAsync_Bool,
-        Settings::Instance().m_enableLinuxVulkanAsyncCompute
-    );
-    vr::VRSettings()->SetBool(
-        vr::k_pch_SteamVR_Section,
-        vr::k_pch_SteamVR_DisableAsyncReprojection_Bool,
-        !Settings::Instance().m_enableLinuxAsyncReprojection
-    );
-#endif
 
     if (!m_baseComponentsInitialized) {
         m_baseComponentsInitialized = true;
@@ -155,6 +145,8 @@ bool Hmd::activate() {
 
             m_directModeComponent
                 = std::make_shared<OvrDirectModeComponent>(m_D3DRender, m_poseHistory);
+#elif __linux__
+            m_directModeComponent = std::make_shared<OvrDirectModeComponent>(m_poseHistory);
 #endif
         }
 
@@ -182,7 +174,7 @@ void* Hmd::get_component(const char* component_name_and_version) {
         return (vr::IVRDisplayComponent*)this;
     }
 
-#ifdef _WIN32
+#ifndef __APPLE__
     if (name_and_vers == vr::IVRDriverDirectModeComponent_Version) {
         return m_directModeComponent.get();
     }
@@ -238,23 +230,26 @@ void Hmd::OnPoseUpdated(uint64_t targetTimestampNs, FfiDeviceMotion motion) {
 
     if (m_viveTrackerProxy)
         m_viveTrackerProxy->update();
-
-#if !defined(_WIN32) && !defined(__APPLE__)
-    // This has to be set after initialization is done, because something in vrcompositor is
-    // setting it to 90Hz in the meantime
-    if (!m_refreshRateSet && m_encoder && m_encoder->IsConnected()) {
-        m_refreshRateSet = true;
-        vr::VRProperties()->SetFloatProperty(
-            this->prop_container,
-            vr::Prop_DisplayFrequency_Float,
-            static_cast<float>(Settings::Instance().m_refreshRate)
-        );
-    }
-#endif
 }
 
 void Hmd::StartStreaming() {
     Debug("Hmd::StartStreaming");
+
+#if !defined(_WIN32) && !defined(__APPLE__)
+    // Set at streaming start rather than activation because vrcompositor
+    // overwrites the display frequency after activation.
+    vr::VRProperties()->SetFloatProperty(
+        this->prop_container,
+        vr::Prop_DisplayFrequency_Float,
+        static_cast<float>(Settings::Instance().m_refreshRate)
+    );
+    // One frame period; ALVR compensates streaming latency in its own tracking path.
+    vr::VRProperties()->SetFloatProperty(
+        this->prop_container,
+        vr::Prop_SecondsFromVsyncToPhotons_Float,
+        1.0f / static_cast<float>(Settings::Instance().m_refreshRate)
+    );
+#endif
 
     vr::VRDriverInput()->UpdateBooleanComponent(m_proximity, true, 0.0);
 
@@ -280,14 +275,12 @@ void Hmd::StartStreaming() {
         m_encoder->Start();
 
         m_directModeComponent->SetEncoder(m_encoder);
+        m_encoder->OnStreamStart();
 
 #elif __APPLE__
         m_encoder = std::make_shared<CEncoder>();
-#else
-        m_encoder = std::make_shared<CEncoder>(m_poseHistory);
-        m_encoder->Start();
-#endif
         m_encoder->OnStreamStart();
+#endif
     }
 
     m_streamComponentsInitialized = true;
@@ -351,6 +344,19 @@ void Hmd::SetViewsConfig(FfiViewsConfig config) {
     if (m_encoder) {
         m_encoder->SetViewsConfig(left_proj, left_transform, right_proj, right_transform);
     }
+#elif !defined(__APPLE__)
+    // The direct mode component needs the FOV to build the reprojection. This
+    // is the only path that delivers it, and without it the warp stays off
+    // silently rather than failing.
+    if (m_directModeComponent) {
+        FfiViewParams params[2] = {};
+        for (int eye = 0; eye < 2; eye++) {
+            params[eye].pose.orientation = { 0.0f, 0.0f, 0.0f, 1.0f };
+            params[eye].pose.position[0] = (eye == 0 ? -0.5f : 0.5f) * config.ipd_m;
+            params[eye].fov = config.fov[eye];
+        }
+        m_directModeComponent->SetViewParams(params);
+    }
 #endif
 
     // todo: check if this is still needed
@@ -374,13 +380,7 @@ void Hmd::GetWindowBounds(int32_t* pnX, int32_t* pnY, uint32_t* pnWidth, uint32_
     *pnHeight = Settings::Instance().m_renderHeight;
 }
 
-bool Hmd::IsDisplayRealDisplay() {
-#ifdef _WIN32
-    return false;
-#else
-    return true;
-#endif
-}
+bool Hmd::IsDisplayRealDisplay() { return false; }
 
 void Hmd::GetRecommendedRenderTargetSize(uint32_t* pnWidth, uint32_t* pnHeight) {
     *pnWidth = Settings::Instance().m_recommendedTargetWidth / 2;
@@ -416,4 +416,12 @@ void Hmd::GetProjectionRaw(vr::EVREye eye, float* left, float* right, float* top
 
 vr::DistortionCoordinates_t Hmd::ComputeDistortion(vr::EVREye, float u, float v) {
     return { { u, v }, { u, v }, { u, v } };
+}
+
+bool Hmd::ComputeInverseDistortion(
+    vr::HmdVector2_t* pResult, vr::EVREye, uint32_t, float fU, float fV
+) {
+    pResult->v[0] = fU;
+    pResult->v[1] = fV;
+    return true;
 }

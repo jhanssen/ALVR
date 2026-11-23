@@ -14,6 +14,16 @@ struct FfiQuat {
     float w;
 };
 
+struct FfiPose {
+    FfiQuat orientation;
+    float position[3];
+};
+
+struct FfiViewParams {
+    FfiPose pose;
+    FfiFov fov;
+};
+
 struct FfiHandSkeleton {
     float jointPositions[31][3];
     FfiQuat jointRotations[31];
@@ -137,7 +147,12 @@ extern "C" void CppInit(bool earlyHmdInitialization);
 extern "C" void* CppOpenvrEntryPoint(const char* pInterfaceName, int* pReturnCode);
 extern "C" bool InitializeStreaming();
 extern "C" void DeinitializeStreaming();
-extern "C" void SendVSync();
+extern "C" void (*SetVsyncRefreshRate)(float refreshRate);
+extern "C" void (*StartVsyncAnnouncer)();
+extern "C" void (*StopVsyncAnnouncer)();
+extern "C" void (*PaceAfterPresent)(unsigned int throttleFrames);
+extern "C" unsigned int (*TakeSkippedVsyncs)();
+extern "C" void SendVSync(double offsetSeconds);
 extern "C" void RequestIDR();
 extern "C" void SetTracking(
     unsigned long long targetTimestampNs,
@@ -162,8 +177,6 @@ extern "C" void SetButton(unsigned long long buttonID, FfiButtonValue value);
 extern "C" void InitOpenvrClient();
 extern "C" void ShutdownOpenvrClient();
 extern "C" void SetChaperoneArea(float areaWidth, float areaHeight);
-
-extern "C" void CaptureFrame();
 
 // NalParsing.cpp
 void ParseFrameNals(

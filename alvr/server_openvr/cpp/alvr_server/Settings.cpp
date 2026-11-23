@@ -39,6 +39,9 @@ void Settings::Load() {
         auto config = v.get("openvr_config");
 
         m_refreshRate = (int)config.get("refresh_rate").get<int64_t>();
+        if (SetVsyncRefreshRate) {
+            SetVsyncRefreshRate((float)m_refreshRate);
+        }
         m_renderWidth = config.get("eye_resolution_width").get<int64_t>() * 2;
         m_renderHeight = config.get("eye_resolution_height").get<int64_t>();
         m_recommendedTargetWidth = config.get("target_eye_resolution_width").get<int64_t>() * 2;

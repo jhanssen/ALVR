@@ -1,7 +1,9 @@
 #include "EncodePipelineVAAPI.h"
 #include "ALVR-common/packet_types.h"
+#include "VkContext.hpp"
 #include "alvr_server/Logger.h"
 #include "alvr_server/Settings.h"
+#include "alvr_server/bindings.h"
 #include "ffmpeg_helper.h"
 #include <chrono>
 
@@ -15,6 +17,8 @@ extern "C" {
 }
 
 namespace {
+
+using alvr::Vendor;
 
 const char* encoder(ALVR_CODEC codec) {
     switch (codec) {
@@ -98,7 +102,7 @@ map_frame(AVBufferRef* hw_frames_ref, AVBufferRef* drm_device_ctx, alvr::VkFrame
 }
 
 // Import VA surface
-AVFrame* import_frame(AVBufferRef* hw_frames_ref, DrmImage& drm) {
+AVFrame* import_frame(AVBufferRef* hw_frames_ref, alvr::DrmImage& drm) {
     AVFrame* va_frame = av_frame_alloc();
     int err = av_hwframe_get_buffer(hw_frames_ref, va_frame, 0);
     if (err < 0) {
@@ -125,12 +129,19 @@ AVFrame* import_frame(AVBufferRef* hw_frames_ref, DrmImage& drm) {
     return va_frame;
 }
 
+// Last target the bitrate manager delivered; see initEncoding.
+int64_t last_known_bitrate_bps = 0;
+
 }
 
 alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
-    Renderer* render, VkContext& vk_ctx, VkFrame& input_frame, uint32_t width, uint32_t height
-)
-    : r(render) {
+    alvr::HWContext& vk_ctx,
+    std::string devicePath,
+    alvr::Vendor vendor,
+    VkFrame& input_frame,
+    uint32_t width,
+    uint32_t height
+) {
     /* VAAPI Encoding pipeline
      * The encoding pipeline has 3 frame types:
      * - input vulkan frames, only used to initialize the mapped frames
@@ -141,9 +152,7 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
      * The pipeline is simply made of a scale_vaapi object, that does the conversion between formats
      * and the encoder that takes the converted frame and produces packets.
      */
-    int err = av_hwdevice_ctx_create(
-        &hw_ctx, AV_HWDEVICE_TYPE_VAAPI, vk_ctx.devicePath.c_str(), NULL, 0
-    );
+    int err = av_hwdevice_ctx_create(&hw_ctx, AV_HWDEVICE_TYPE_VAAPI, devicePath.c_str(), NULL, 0);
     if (err < 0) {
         throw alvr::AvException("Failed to create a VAAPI device:", err);
     }
@@ -157,9 +166,9 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
         throw alvr::AvException("Failed to create DRM device:", err);
     }
 
-    const auto& settings = Settings::Instance();
+    const auto* settings = Settings_Instance();
 
-    auto codec_id = ALVR_CODEC(settings.m_codec);
+    auto codec_id = ALVR_CODEC(settings->m_codec);
     const char* encoder_name = encoder(codec_id);
     const AVCodec* codec = avcodec_find_encoder_by_name(encoder_name);
     if (codec == nullptr) {
@@ -175,20 +184,20 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
 
     switch (codec_id) {
     case ALVR_CODEC_H264:
-        switch (settings.m_h264Profile) {
+        switch (settings->m_h264Profile) {
         case ALVR_H264_PROFILE_BASELINE:
-            encoder_ctx->profile = FF_PROFILE_H264_BASELINE;
+            encoder_ctx->profile = AV_PROFILE_H264_BASELINE;
             break;
         case ALVR_H264_PROFILE_MAIN:
-            encoder_ctx->profile = FF_PROFILE_H264_MAIN;
+            encoder_ctx->profile = AV_PROFILE_H264_MAIN;
             break;
         default:
         case ALVR_H264_PROFILE_HIGH:
-            encoder_ctx->profile = FF_PROFILE_H264_HIGH;
+            encoder_ctx->profile = AV_PROFILE_H264_HIGH;
             break;
         }
 
-        switch (settings.m_entropyCoding) {
+        switch (settings->m_entropyCoding) {
         case ALVR_CABAC:
             av_opt_set(encoder_ctx->priv_data, "coder", "ac", 0);
             break;
@@ -199,16 +208,16 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
 
         break;
     case ALVR_CODEC_HEVC:
-        encoder_ctx->profile = Settings::Instance().m_use10bitEncoder ? FF_PROFILE_HEVC_MAIN_10
-                                                                      : FF_PROFILE_HEVC_MAIN;
+        encoder_ctx->profile = Settings::Instance().m_use10bitEncoder ? AV_PROFILE_HEVC_MAIN_10
+                                                                      : AV_PROFILE_HEVC_MAIN;
         encoder_ctx->gop_size = INT16_MAX;
         break;
     case ALVR_CODEC_AV1:
-        encoder_ctx->profile = FF_PROFILE_AV1_MAIN;
+        encoder_ctx->profile = AV_PROFILE_AV1_MAIN;
         break;
     }
 
-    switch (settings.m_rateControlMode) {
+    switch (settings->m_rateControlMode) {
     case ALVR_VBR:
         av_opt_set(encoder_ctx->priv_data, "rc_mode", "VBR", 0);
         break;
@@ -218,7 +227,7 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
         break;
     }
 
-    av_opt_set_int(encoder_ctx->priv_data, "filler_data", settings.m_fillerData, 0);
+    av_opt_set_int(encoder_ctx->priv_data, "filler_data", settings->m_fillerData, 0);
 
     encoder_ctx->width = width;
     encoder_ctx->height = height;
@@ -226,46 +235,53 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
     encoder_ctx->sample_aspect_ratio = AVRational { 1, 1 };
     encoder_ctx->pix_fmt = AV_PIX_FMT_VAAPI;
     encoder_ctx->max_b_frames = 0;
-    encoder_ctx->color_range
-        = Settings::Instance().m_useFullRangeEncoding ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+    encoder_ctx->color_range = AVCOL_RANGE_JPEG;
+    encoder_ctx->color_primaries = AVCOL_PRI_BT709;
+    encoder_ctx->color_trc = AVCOL_TRC_IEC61966_2_1;
+    encoder_ctx->colorspace = AVCOL_SPC_BT709;
 
-    auto params = FfiDynamicEncoderParams {};
+    // The manager reports a target only once per change, so a rebuild mid
+    // session has to reuse the last one.
+    auto params = GetDynamicEncoderParams();
+    if (!params.updated || params.bitrate_bps <= 0) {
+        params.bitrate_bps = last_known_bitrate_bps > 0 ? last_known_bitrate_bps : 30'000'000;
+    }
     params.updated = true;
-    params.bitrate_bps = 30'000'000;
-    params.framerate = settings.m_refreshRate;
+    params.framerate = settings->m_refreshRate;
+    Info("VAAPI init bitrate: %.1f Mbps\n", params.bitrate_bps / 1e6);
     SetParams(params);
 
     vlVaQualityBits quality = {};
     quality.vbaq_mode
-        = Settings::Instance()
-              .m_enableVbaq; // No noticable performance difference and should improve subjective
-                             // quality by allocating more bits to smooth areas
-    switch (settings.m_encoderQualityPreset) {
+        = Settings_Instance()
+              ->m_enableVbaq; // No noticable performance difference and should improve subjective
+                              // quality by allocating more bits to smooth areas
+    switch (settings->m_encoderQualityPreset) {
     case ALVR_QUALITY:
-        if (vk_ctx.amd) {
+        if (vendor == Vendor::Amd) {
             quality.preset_mode = PRESET_MODE_QUALITY;
             encoder_ctx->compression_level
                 = quality.quality; // (QUALITY preset, no pre-encoding, vbaq)
-        } else if (vk_ctx.intel) {
+        } else if (vendor == Vendor::Intel) {
             encoder_ctx->compression_level = 1;
         }
         break;
     case ALVR_BALANCED:
-        if (vk_ctx.amd) {
+        if (vendor == Vendor::Amd) {
             quality.preset_mode = PRESET_MODE_BALANCE;
             encoder_ctx->compression_level
                 = quality.quality; // (BALANCE preset, no pre-encoding, vbaq)
-        } else if (vk_ctx.intel) {
+        } else if (vendor == Vendor::Intel) {
             encoder_ctx->compression_level = 4;
         }
         break;
     case ALVR_SPEED:
     default:
-        if (vk_ctx.amd) {
+        if (vendor == Vendor::Amd) {
             quality.preset_mode = PRESET_MODE_SPEED;
             encoder_ctx->compression_level
                 = quality.quality; // (speed preset, no pre-encoding, vbaq)
-        } else if (vk_ctx.intel) {
+        } else if (vendor == Vendor::Intel) {
             encoder_ctx->compression_level = 7;
         }
         break;
@@ -273,17 +289,11 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
 
     av_opt_set_int(encoder_ctx->priv_data, "async_depth", 1, 0);
 
-    set_hwframe_ctx(encoder_ctx, hw_ctx);
-
-    err = avcodec_open2(encoder_ctx, codec, NULL);
-    if (err < 0) {
-        throw alvr::AvException("Cannot open video encoder codec:", err);
-    }
-
     AVBufferRef* hw_frames_ref;
     if (!(hw_frames_ref = av_hwframe_ctx_alloc(hw_ctx))) {
         throw std::runtime_error("Failed to create VAAPI frame context.");
     }
+
     auto frames_ctx = (AVHWFramesContext*)(hw_frames_ref->data);
     frames_ctx->format = AV_PIX_FMT_VAAPI;
     frames_ctx->sw_format = input_frame.avFormat();
@@ -296,13 +306,15 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
     }
 
     encoder_frame = av_frame_alloc();
-    if (vk_ctx.intel || getenv("ALVR_VAAPI_IMPORT_SURFACE")) {
+    if (vendor == Vendor::Intel || getenv("ALVR_VAAPI_IMPORT_SURFACE")) {
+        // TODO: Fix output import
         Info("Importing VA surface");
         DrmImage drm;
         mapped_frame = import_frame(hw_frames_ref, drm);
-        r->ImportOutput(drm);
+        // r->ImportOutput(drm);
     } else {
         mapped_frame = map_frame(hw_frames_ref, drm_ctx, input_frame);
+        // std::cout << "mapped frame" << std::endl;
     }
 
     filter_graph = avfilter_graph_alloc();
@@ -310,27 +322,23 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
     AVFilterInOut* outputs = avfilter_inout_alloc();
     AVFilterInOut* inputs = avfilter_inout_alloc();
 
+    // TODO: Respect colorspace
     std::stringstream buffer_filter_args;
     buffer_filter_args << "video_size=" << mapped_frame->width << "x" << mapped_frame->height;
-    buffer_filter_args << ":pix_fmt=" << mapped_frame->format;
     buffer_filter_args << ":time_base=" << encoder_ctx->time_base.num << "/"
                        << encoder_ctx->time_base.den;
-    if ((err = avfilter_graph_create_filter(
-             &filter_in,
-             avfilter_get_by_name("buffer"),
-             "in",
-             buffer_filter_args.str().c_str(),
-             NULL,
-             filter_graph
-         ))) {
-        throw alvr::AvException("filter_in creation failed:", err);
+    filter_in = avfilter_graph_alloc_filter(filter_graph, avfilter_get_by_name("buffer"), "in");
+    if (!filter_in) {
+        throw std::runtime_error("filter_in allocation failed");
     }
     AVBufferSrcParameters* par = av_buffersrc_parameters_alloc();
-    memset(par, 0, sizeof(*par));
-    par->format = AV_PIX_FMT_NONE;
+    par->format = mapped_frame->format;
     par->hw_frames_ctx = av_buffer_ref(mapped_frame->hw_frames_ctx);
     av_buffersrc_parameters_set(filter_in, par);
     av_free(par);
+    if ((err = avfilter_init_str(filter_in, buffer_filter_args.str().c_str()))) {
+        throw alvr::AvException("filter_in creation failed:", err);
+    }
 
     if ((err = avfilter_graph_create_filter(
              &filter_out, avfilter_get_by_name("buffersink"), "out", NULL, NULL, filter_graph
@@ -348,9 +356,8 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
     inputs->pad_idx = 0;
     inputs->next = NULL;
 
-    std::string filters = Settings::Instance().m_useFullRangeEncoding
-        ? "scale_vaapi=out_range=full:format="
-        : "scale_vaapi=format=";
+    std::string filters = "scale_vaapi=w=" + std::to_string(width) + ":h=" + std::to_string(height)
+        + ":out_range=full:out_color_matrix=bt709:format=";
     if ((Settings::Instance().m_codec == ALVR_CODEC_HEVC
          || Settings::Instance().m_codec == ALVR_CODEC_AV1)
         && Settings::Instance().m_use10bitEncoder) {
@@ -373,20 +380,32 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
     if ((err = avfilter_graph_config(filter_graph, NULL))) {
         throw alvr::AvException("avfilter_graph_config failed:", err);
     }
+
+    AVBufferRef* out_hw_frames = av_buffersink_get_hw_frames_ctx(filter_out);
+    if (!out_hw_frames) {
+        throw std::runtime_error("Failed to get hw_frames_ctx from buffersink. scale_vaapi failed "
+                                 "to output a hardware frame.");
+    }
+
+    encoder_ctx->hw_frames_ctx = av_buffer_ref(out_hw_frames);
+
+    err = avcodec_open2(encoder_ctx, codec, NULL);
+    if (err < 0) {
+        throw alvr::AvException("Cannot open video encoder codec:", err);
+    }
 }
 
 alvr::EncodePipelineVAAPI::~EncodePipelineVAAPI() {
-    // Commented because freeing it here causes a gpu reset, it should be cleaned up away
-    // avcodec_free_context(&encoder_ctx);
-    // avfilter_graph_free(&filter_graph);
-    // av_frame_free(&mapped_frame);
-    // av_frame_free(&encoder_frame);
-    // av_buffer_unref(&hw_ctx);
-    // av_buffer_unref(&drm_ctx);
+    avcodec_send_frame(encoder_ctx, nullptr);
+    avcodec_free_context(&encoder_ctx);
+    avfilter_graph_free(&filter_graph);
+    av_frame_free(&mapped_frame);
+    av_frame_free(&encoder_frame);
+    av_buffer_unref(&hw_ctx);
+    av_buffer_unref(&drm_ctx);
 }
 
 void alvr::EncodePipelineVAAPI::PushFrame(uint64_t targetTimestampNs, bool idr) {
-    r->Sync();
     timestamp.cpu = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()
     )
@@ -415,6 +434,8 @@ void alvr::EncodePipelineVAAPI::SetParams(FfiDynamicEncoderParams params) {
     if (!params.updated) {
         return;
     }
+    // Survives encoder rebuilds; see the note on the variable.
+    last_known_bitrate_bps = params.bitrate_bps;
     encoder_ctx->bit_rate = params.bitrate_bps;
     encoder_ctx->framerate = AVRational { int(params.framerate * 1000), 1000 };
     encoder_ctx->rc_buffer_size = encoder_ctx->bit_rate / params.framerate;

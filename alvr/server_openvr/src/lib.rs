@@ -1,6 +1,7 @@
 mod graphics;
 mod props;
 mod tracking;
+mod vsync;
 
 #[allow(
     non_camel_case_types,
@@ -236,7 +237,7 @@ fn event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
                     }
                 }
                 ServerCoreEvent::RequestIDR => unsafe { RequestIDR() },
-                ServerCoreEvent::CaptureFrame => unsafe { CaptureFrame() },
+                ServerCoreEvent::CaptureFrame => {}
                 ServerCoreEvent::GameRenderLatencyFeedback(game_latency) => {
                     if cfg!(target_os = "linux") && game_latency.as_secs_f32() > 0.25 {
                         let now = Instant::now();
@@ -483,6 +484,11 @@ pub unsafe extern "C" fn HmdDriverFactory(
             ReportComposed = Some(report_composed);
             ReportPresent = Some(report_present);
             WaitForVSync = Some(wait_for_vsync);
+            SetVsyncRefreshRate = Some(vsync::set_refresh_rate);
+            StartVsyncAnnouncer = Some(vsync::start_vsync_announcer);
+            StopVsyncAnnouncer = Some(vsync::stop_vsync_announcer);
+            PaceAfterPresent = Some(vsync::pace_after_present);
+            TakeSkippedVsyncs = Some(vsync::take_skipped_vsyncs);
             ShutdownRuntime = Some(shutdown_driver);
 
             // When there is already a ALVR dashboard running, initialize the HMD device early to

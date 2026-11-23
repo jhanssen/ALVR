@@ -2,9 +2,12 @@
 #include "Logger.h"
 #include "Utils.h"
 #include "include/openvr_math.h"
-#include <chrono>
 #include <mutex>
 #include <optional>
+
+// A submitted frame was rendered from a recent pose, so matches older than this
+// are stale no matter how well the rotation agrees.
+static constexpr uint64_t MATCH_WINDOW_NS = 250000000;
 
 void PoseHistory::OnPoseUpdated(uint64_t targetTimestampNs, FfiDeviceMotion motion) {
     // Put pose history buffer
@@ -43,36 +46,22 @@ void PoseHistory::OnPoseUpdated(uint64_t targetTimestampNs, FfiDeviceMotion moti
 std::optional<PoseHistory::TrackingHistoryFrame>
 PoseHistory::GetBestPoseMatch(const vr::HmdMatrix34_t& pose) const {
     std::unique_lock<std::mutex> lock(m_mutex);
-
-    // The Linux capture layer reports an all-zero pose when it can't locate the compositor's
-    // frame pose; matching against that is meaningless, so use the newest pose instead.
-    float norm = 0;
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            norm += pose.m[j][i] * pose.m[j][i];
-        }
-    }
-    if (norm < 0.5f) {
-        if (m_poseBuffer.empty()) {
-            return {};
-        }
-        static uint64_t fb_n = 0, fb_last_ns = 0;
-        fb_n++;
-        auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                          std::chrono::steady_clock::now().time_since_epoch()
-        )
-                          .count();
-        if (now_ns - fb_last_ns > 1000000000ULL) {
-            Info("PoseMatch: zero pose from layer, using newest (n=%llu)\n", (unsigned long long)fb_n);
-            fb_last_ns = now_ns;
-            fb_n = 0;
-        }
-        return m_poseBuffer.back();
+    if (m_poseBuffer.empty()) {
+        Debug("PoseHistory::GetBestPoseMatch: No pose matched.");
+        return {};
     }
 
+    // The buffer holds about 1.7 seconds of tracking, so sweeping the head back
+    // over an orientation it recently held leaves several entries matching
+    // equally well. Search newest first so a tie resolves to the most recent
+    // entry, and stop at the window bound.
+    const uint64_t newestTimestampNs = m_poseBuffer.back().targetTimestampNs;
     float minDiff = 100000;
-    auto minIt = m_poseBuffer.begin();
-    for (auto it = m_poseBuffer.begin(); it != m_poseBuffer.end(); ++it) {
+    auto minIt = m_poseBuffer.rbegin();
+    for (auto it = m_poseBuffer.rbegin(); it != m_poseBuffer.rend(); ++it) {
+        if (newestTimestampNs - it->targetTimestampNs > MATCH_WINDOW_NS) {
+            break;
+        }
         float distance = 0;
         // Rotation matrix composes a part of ViewMatrix of TrackingInfo.
         // Be carefull of transpose.
@@ -88,33 +77,7 @@ PoseHistory::GetBestPoseMatch(const vr::HmdMatrix34_t& pose) const {
             minDiff = distance;
         }
     }
-    if (minIt != m_poseBuffer.end()) {
-        static uint64_t dbg_n = 0, dbg_last_ns = 0, dbg_max_age = 0, dbg_sum_age = 0;
-        static float dbg_max_dist = 0;
-        uint64_t age = m_poseBuffer.back().targetTimestampNs - minIt->targetTimestampNs;
-        dbg_n++;
-        dbg_sum_age += age;
-        if (age > dbg_max_age) dbg_max_age = age;
-        if (minDiff > dbg_max_dist) dbg_max_dist = minDiff;
-        auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                          std::chrono::steady_clock::now().time_since_epoch()
-        )
-                          .count();
-        if (now_ns - dbg_last_ns > 1000000000ULL) {
-            Info(
-                "PoseMatch: n=%llu buf=%zu avg_age_ms=%.1f max_age_ms=%.1f max_dist=%g\n",
-                (unsigned long long)dbg_n, m_poseBuffer.size(),
-                dbg_n ? dbg_sum_age / 1e6 / dbg_n : 0.0, dbg_max_age / 1e6, dbg_max_dist
-            );
-            dbg_last_ns = now_ns;
-            dbg_n = dbg_sum_age = dbg_max_age = 0;
-            dbg_max_dist = 0;
-        }
-        return *minIt;
-    }
-
-    Debug("PoseHistory::GetBestPoseMatch: No pose matched.");
-    return {};
+    return *minIt;
 }
 
 std::optional<PoseHistory::TrackingHistoryFrame> PoseHistory::GetPoseAt(uint64_t timestampNs
@@ -127,6 +90,14 @@ std::optional<PoseHistory::TrackingHistoryFrame> PoseHistory::GetPoseAt(uint64_t
 
     Debug("PoseHistory::GetPoseAt: No pose matched.");
     return {};
+}
+
+std::optional<PoseHistory::TrackingHistoryFrame> PoseHistory::GetLatestPose() const {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    if (m_poseBuffer.empty()) {
+        return {};
+    }
+    return m_poseBuffer.back();
 }
 
 void PoseHistory::SetTransform(const vr::HmdMatrix34_t& transform) {

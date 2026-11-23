@@ -3,8 +3,6 @@
 #include <windows.h>
 #elif __APPLE__
 #include "platform/macos/CEncoder.h"
-#else
-#include "platform/linux/CEncoder.h"
 #endif
 #include "Controller.h"
 #include "FakeViveTracker.h"
@@ -144,9 +142,11 @@ public:
 
                 HapticsSend(id, haptics.fDurationSeconds, haptics.fFrequency, haptics.fAmplitude);
             }
+
+// remove?
 #ifdef __linux__
             else if (event.eventType == vr::VREvent_ChaperoneUniverseHasChanged
-                     || event.eventType == vr::VREvent_ChaperoneRoomSetupFinished
+                     || event.eventType == vr::VREvent_ChaperoneRoomSetupCommitted
                      || event.eventType == vr::VREvent_ChaperoneFlushCache
                      || event.eventType == vr::VREvent_ChaperoneSettingsHaveChanged
                      || event.eventType == vr::VREvent_SeatedZeroPoseReset
@@ -220,6 +220,11 @@ unsigned long long (*GetSerialNumber)(unsigned long long deviceID, char* outStri
 void (*SetOpenvrProps)(void* instancePtr, unsigned long long deviceID);
 void (*RegisterButtons)(void* instancePtr, unsigned long long deviceID);
 void (*WaitForVSync)();
+void (*SetVsyncRefreshRate)(float refreshRate);
+void (*StartVsyncAnnouncer)();
+void (*StopVsyncAnnouncer)();
+void (*PaceAfterPresent)(unsigned int throttleFrames);
+unsigned int (*TakeSkippedVsyncs)();
 
 void CppInit(bool earlyHmdInitialization) {
     g_driver_provider.early_hmd_initialization = earlyHmdInitialization;
@@ -246,6 +251,12 @@ void* CppOpenvrEntryPoint(const char* interface_name, int* return_code) {
 
 bool InitializeStreaming() {
     Settings::Instance().Load();
+
+#ifdef __linux__
+    if (g_driver_provider.hmd && g_driver_provider.hmd->m_directModeComponent) {
+        g_driver_provider.hmd->m_directModeComponent->RequestEncoderReset();
+    }
+#endif
 
     if (!g_driver_provider.devices_initialized) {
         if (!g_driver_provider.early_hmd_initialization) {
@@ -372,17 +383,29 @@ bool InitializeStreaming() {
 }
 
 void DeinitializeStreaming() {
+#ifdef __linux__
+    if (g_driver_provider.hmd && g_driver_provider.hmd->m_directModeComponent) {
+        g_driver_provider.hmd->m_directModeComponent->RequestEncoderShutdown();
+    }
+#endif
+
     if (g_driver_provider.hmd) {
         g_driver_provider.hmd->StopStreaming();
     }
 }
 
-void SendVSync() { vr::VRServerDriverHost()->VsyncEvent(0.0); }
+void SendVSync(double offsetSeconds) { vr::VRServerDriverHost()->VsyncEvent(offsetSeconds); }
 
 void RequestIDR() {
+#ifdef _WIN32
     if (g_driver_provider.hmd && g_driver_provider.hmd->m_encoder) {
         g_driver_provider.hmd->m_encoder->InsertIDR();
     }
+#elif __linux__
+    if (g_driver_provider.hmd && g_driver_provider.hmd->m_directModeComponent) {
+        g_driver_provider.hmd->m_directModeComponent->RequestIdr();
+    }
+#endif
 }
 
 void SetTracking(
@@ -442,9 +465,15 @@ void SetTracking(
 }
 
 void VideoErrorReportReceive() {
+#ifdef _WIN32
     if (g_driver_provider.hmd) {
         g_driver_provider.hmd->m_encoder->OnPacketLoss();
     }
+#elif __linux__
+    if (g_driver_provider.hmd && g_driver_provider.hmd->m_directModeComponent) {
+        g_driver_provider.hmd->m_directModeComponent->RequestIdr();
+    }
+#endif
 }
 
 void RequestDriverResync() {
@@ -520,12 +549,4 @@ void SetButton(unsigned long long buttonID, FfiButtonValue value) {
 
 void SetChaperoneArea(float areaWidth, float areaHeight) {
     _SetChaperoneArea(areaWidth, areaHeight);
-}
-
-void CaptureFrame() {
-#ifndef __APPLE__
-    if (g_driver_provider.hmd && g_driver_provider.hmd->m_encoder) {
-        g_driver_provider.hmd->m_encoder->CaptureFrame();
-    }
-#endif
 }

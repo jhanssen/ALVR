@@ -1,15 +1,25 @@
 use std::{env, path::PathBuf};
 
-fn get_ffmpeg_path() -> PathBuf {
+fn get_vulkan_headers_path(platform_name: &str) -> PathBuf {
+    alvr_filesystem::deps_dir()
+        .join(if platform_name == "linux" {
+            "linux"
+        } else {
+            "windows"
+        })
+        .join("vulkan-headers/include")
+}
+
+fn get_ffmpeg_path(platform_name: &str) -> PathBuf {
     let ffmpeg_path = alvr_filesystem::deps_dir()
-        .join(if cfg!(target_os = "linux") {
+        .join(if platform_name == "linux" {
             "linux"
         } else {
             "windows"
         })
         .join("ffmpeg");
 
-    if cfg!(target_os = "linux") {
+    if platform_name == "linux" {
         ffmpeg_path.join("alvr_build")
     } else {
         ffmpeg_path
@@ -63,6 +73,8 @@ fn main() {
         .cpp(true)
         .std("c++17")
         .files(source_files_paths)
+        .flag_if_supported("-std=c++20")
+        .flag_if_supported("-fdiagnostics-color=always")
         .include(alvr_filesystem::workspace_dir().join("openvr/headers"))
         .include("cpp");
 
@@ -81,59 +93,86 @@ fn main() {
     #[cfg(debug_assertions)]
     build.define("ALVR_DEBUG_LOG", None);
 
-    let gpl_or_linux = cfg!(feature = "gpl") || cfg!(target_os = "linux");
+    let gpl_or_linux = cfg!(feature = "gpl") || platform_name == "linux";
 
     if gpl_or_linux {
-        let ffmpeg_path = get_ffmpeg_path();
+        let ffmpeg_path = get_ffmpeg_path(&platform_name);
 
         assert!(ffmpeg_path.join("include").exists());
+
+        let vulkan_headers = get_vulkan_headers_path(&platform_name);
+        assert!(vulkan_headers.exists());
+        build.include(vulkan_headers);
+
         build.include(ffmpeg_path.join("include"));
     }
 
-    #[cfg(all(target_os = "linux", feature = "gpl"))]
-    {
-        let x264_path = get_linux_x264_path();
+    if platform_name == "linux" {
+        #[cfg(all(target_os = "linux", feature = "gpl"))]
+        {
+            let x264_path = get_linux_x264_path();
 
-        assert!(x264_path.join("include").exists());
-        build.include(x264_path.join("include"));
+            assert!(x264_path.join("include").exists());
+            build.include(x264_path.join("include"));
+        }
     }
 
     #[cfg(feature = "gpl")]
     build.define("ALVR_GPL", None);
 
-    build.compile("bindings");
-
-    #[cfg(all(target_os = "linux", feature = "gpl"))]
-    {
-        let x264_path = get_linux_x264_path();
-        let x264_lib_path = x264_path.join("lib");
+    if platform_name == "windows" {
+        let vpl_path = alvr_filesystem::deps_dir().join("windows/libvpl/alvr_build");
+        let vpl_include_path = vpl_path.join("include");
+        let vpl_lib_path = vpl_path.join("lib");
 
         println!(
             "cargo:rustc-link-search=native={}",
-            x264_lib_path.to_string_lossy()
+            vpl_lib_path.to_string_lossy()
         );
 
-        let x264_pkg_path = x264_lib_path.join("pkgconfig");
-        assert!(x264_pkg_path.exists());
+        build.define("ONEVPL_EXPERIMENTAL", None);
+        build.include(vpl_include_path);
+        println!("cargo:rustc-link-lib=vpl");
+    }
 
-        let x264_pkg_path = x264_pkg_path.to_string_lossy().to_string();
-        env::set_var(
-            "PKG_CONFIG_PATH",
-            env::var("PKG_CONFIG_PATH").map_or(x264_pkg_path.clone(), |old| {
-                format!("{x264_pkg_path}:{old}")
-            }),
-        );
-        println!("cargo:rustc-link-lib=static=x264");
+    build.compile("bindings");
 
-        pkg_config::Config::new()
-            .statik(true)
-            .probe("x264")
-            .unwrap();
+    if platform_name == "linux" {
+        #[cfg(all(target_os = "linux", feature = "gpl"))]
+        {
+            let x264_path = get_linux_x264_path();
+            let x264_lib_path = x264_path.join("lib");
+
+            println!(
+                "cargo:rustc-link-search=native={}",
+                x264_lib_path.to_string_lossy()
+            );
+
+            let x264_pkg_path = x264_lib_path.join("pkgconfig");
+            assert!(x264_pkg_path.exists());
+
+            let x264_pkg_path = x264_pkg_path.to_string_lossy().to_string();
+            unsafe {
+                env::set_var(
+                    "PKG_CONFIG_PATH",
+                    env::var("PKG_CONFIG_PATH").map_or(x264_pkg_path.clone(), |old| {
+                        format!("{x264_pkg_path}:{old}")
+                    }),
+                )
+            };
+            println!("cargo:rustc-link-lib=static=x264");
+
+            #[cfg(target_os = "linux")]
+            pkg_config::Config::new()
+                .statik(true)
+                .probe("x264")
+                .unwrap();
+        }
     }
 
     // ffmpeg
     if gpl_or_linux {
-        let ffmpeg_path = get_ffmpeg_path();
+        let ffmpeg_path = get_ffmpeg_path(&platform_name);
         let ffmpeg_lib_path = ffmpeg_path.join("lib");
 
         assert!(ffmpeg_lib_path.exists());
@@ -143,28 +182,32 @@ fn main() {
             ffmpeg_lib_path.to_string_lossy()
         );
 
-        #[cfg(target_os = "linux")]
-        {
+        if platform_name == "linux" {
             let ffmpeg_pkg_path = ffmpeg_lib_path.join("pkgconfig");
             assert!(ffmpeg_pkg_path.exists());
 
             let ffmpeg_pkg_path = ffmpeg_pkg_path.to_string_lossy().to_string();
-            env::set_var(
-                "PKG_CONFIG_PATH",
-                env::var("PKG_CONFIG_PATH").map_or(ffmpeg_pkg_path.clone(), |old| {
-                    format!("{ffmpeg_pkg_path}:{old}")
-                }),
-            );
+            unsafe {
+                env::set_var(
+                    "PKG_CONFIG_PATH",
+                    env::var("PKG_CONFIG_PATH").map_or(ffmpeg_pkg_path.clone(), |old| {
+                        format!("{ffmpeg_pkg_path}:{old}")
+                    }),
+                )
+            };
 
-            let pkg = pkg_config::Config::new().statik(true).to_owned();
+            #[cfg(target_os = "linux")]
+            {
+                let pkg = pkg_config::Config::new().statik(true).to_owned();
 
-            for lib in ["libavutil", "libavfilter", "libavcodec"] {
-                pkg.probe(lib).unwrap();
+                for lib in ["libavutil", "libavfilter", "libavcodec"] {
+                    pkg.probe(lib).unwrap();
+                }
             }
-        }
-        #[cfg(windows)]
-        for lib in ["avutil", "avfilter", "avcodec", "swscale"] {
-            println!("cargo:rustc-link-lib={lib}");
+        } else if platform_name == "windows" {
+            for lib in ["avutil", "avfilter", "avcodec", "swscale"] {
+                println!("cargo:rustc-link-lib={lib}");
+            }
         }
     }
 
@@ -195,12 +238,12 @@ fn main() {
         println!("cargo:rustc-link-lib=openvr_api");
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        pkg_config::Config::new().probe("vulkan").unwrap();
-
-        #[cfg(not(feature = "gpl"))]
+    if platform_name == "linux" {
+        #[cfg(target_os = "linux")]
         {
+            pkg_config::Config::new().probe("vulkan").unwrap();
+
+            #[cfg(not(feature = "gpl"))]
             pkg_config::Config::new().probe("x264").unwrap();
         }
 
@@ -209,6 +252,14 @@ fn main() {
     }
 
     for path in cpp_paths {
+        println!("cargo:rerun-if-changed={}", path.to_string_lossy());
+    }
+
+    for path in walkdir::WalkDir::new(alvr_filesystem::workspace_dir().join("openvr/headers"))
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .map(|e| e.into_path())
+    {
         println!("cargo:rerun-if-changed={}", path.to_string_lossy());
     }
 }

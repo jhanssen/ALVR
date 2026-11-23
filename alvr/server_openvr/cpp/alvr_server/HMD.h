@@ -6,6 +6,8 @@
 #include <memory>
 #ifdef _WIN32
 #include "platform/win32/OvrDirectModeComponent.h"
+#elif __linux__
+#include "platform/linux/OvrDirectModeComponent.h"
 #endif
 
 class Controller;
@@ -15,6 +17,8 @@ class ViveTrackerProxy;
 class CEncoder;
 #ifdef _WIN32
 class CD3DRender;
+#elif __linux__
+class Renderer;
 #endif
 class PoseHistory;
 
@@ -49,15 +53,14 @@ private:
     std::shared_ptr<CD3DRender> m_D3DRender;
 #endif
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
+public:
     std::shared_ptr<OvrDirectModeComponent> m_directModeComponent;
+
+private:
 #endif
 
     std::shared_ptr<ViveTrackerProxy> m_viveTrackerProxy;
-
-#ifndef _WIN32
-    bool m_refreshRateSet = false;
-#endif
 
     // TrackedDevice
     virtual bool activate() final;
@@ -74,4 +77,7 @@ private:
     virtual void
     GetProjectionRaw(vr::EVREye eEye, float* pfLeft, float* pfRight, float* pfTop, float* pfBottom);
     virtual vr::DistortionCoordinates_t ComputeDistortion(vr::EVREye eEye, float fU, float fV);
+    virtual bool ComputeInverseDistortion(
+        vr::HmdVector2_t* pResult, vr::EVREye eEye, uint32_t unChannel, float fU, float fV
+    );
 };

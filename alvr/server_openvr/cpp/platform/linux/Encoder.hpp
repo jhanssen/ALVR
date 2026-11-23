@@ -68,6 +68,76 @@ inline auto makeColorCorrection(Settings const& settings, vk::Extent2D extent) {
     return info;
 }
 
+// Foveation parameters computed the way the v20 client expects, aligned so the
+// encoded frame is a whole number of blocks.
+struct V20Foveation {
+    render::PipelineCreateInfo info;
+    vk::Extent2D outSize;
+    float centerShiftX;
+    float centerShiftY;
+};
+
+inline V20Foveation makeFoveation(Settings const& settings) {
+    float targetEyeWidth = (float)settings.m_renderWidth / 2;
+    float targetEyeHeight = (float)settings.m_renderHeight;
+
+    float centerSizeX = settings.m_foveationCenterSizeX;
+    float centerSizeY = settings.m_foveationCenterSizeY;
+    float centerShiftX = settings.m_foveationCenterShiftX;
+    float centerShiftY = settings.m_foveationCenterShiftY;
+    float edgeRatioX = settings.m_foveationEdgeRatioX;
+    float edgeRatioY = settings.m_foveationEdgeRatioY;
+
+    float edgeSizeX = targetEyeWidth - centerSizeX * targetEyeWidth;
+    float edgeSizeY = targetEyeHeight - centerSizeY * targetEyeHeight;
+
+    float centerSizeXAligned
+        = 1. - ceil(edgeSizeX / (edgeRatioX * 2.)) * (edgeRatioX * 2.) / targetEyeWidth;
+    float centerSizeYAligned
+        = 1. - ceil(edgeSizeY / (edgeRatioY * 2.)) * (edgeRatioY * 2.) / targetEyeHeight;
+
+    float edgeSizeXAligned = targetEyeWidth - centerSizeXAligned * targetEyeWidth;
+    float edgeSizeYAligned = targetEyeHeight - centerSizeYAligned * targetEyeHeight;
+
+    float centerShiftXAligned = ceil(centerShiftX * edgeSizeXAligned / (edgeRatioX * 2.))
+        * (edgeRatioX * 2.) / edgeSizeXAligned;
+    float centerShiftYAligned = ceil(centerShiftY * edgeSizeYAligned / (edgeRatioY * 2.))
+        * (edgeRatioY * 2.) / edgeSizeYAligned;
+
+    float foveationScaleX = (centerSizeXAligned + (1. - centerSizeXAligned) / edgeRatioX);
+    float foveationScaleY = (centerSizeYAligned + (1. - centerSizeYAligned) / edgeRatioY);
+
+    float optimizedEyeWidth = foveationScaleX * targetEyeWidth;
+    float optimizedEyeHeight = foveationScaleY * targetEyeHeight;
+
+    auto optimizedEyeWidthAligned = (uint32_t)ceil(optimizedEyeWidth / 32.f) * 32;
+    auto optimizedEyeHeightAligned = (uint32_t)ceil(optimizedEyeHeight / 32.f) * 32;
+
+    float eyeWidthRatioAligned = optimizedEyeWidth / optimizedEyeWidthAligned;
+    float eyeHeightRatioAligned = optimizedEyeHeight / optimizedEyeHeightAligned;
+
+    // The order of this needs to be kept in sync with the shader!
+    // clang-format off
+    auto info = makeSpecs(
+        eyeWidthRatioAligned,
+        eyeHeightRatioAligned,
+        centerSizeXAligned,
+        centerSizeYAligned,
+        edgeRatioX,
+        edgeRatioY);
+    // clang-format on
+
+    info.shaderData
+        = std::vector(FFR_SHADER_COMP_SPV_PTR, FFR_SHADER_COMP_SPV_PTR + FFR_SHADER_COMP_SPV_LEN);
+
+    return {
+        .info = info,
+        .outSize = { .width = optimizedEyeWidthAligned * 2, .height = optimizedEyeHeightAligned },
+        .centerShiftX = centerShiftXAligned,
+        .centerShiftY = centerShiftYAligned,
+    };
+}
+
 class Encoder {
     vk::Extent2D outExtent;
 
@@ -85,6 +155,8 @@ class Encoder {
     // and warping there would move the frame's stamp while leaving the pixels
     // unwarped, which is worse than not warping at all.
     bool warpCapableChain = false;
+
+    float foveationShift[2] = { 0.f, 0.f };
 
 public:
     // TODO: How are we supposed to match the physical device with direct mode?
@@ -109,10 +181,18 @@ public:
         if (settings->m_enableColorCorrection)
             pipeCIs.push_back(makeColorCorrection(*settings, inExtent));
 
-        // The client's foveation decoder uses a different algorithm than this pass chain's
-        // ffr.comp, so foveated encoding is not supported here.
+        // NOTE: This needs to be last as it needs to render into the output image
         if (settings->m_enableFoveatedEncoding) {
-            Warn("Foveated encoding is not supported with direct mode; disable it in settings\n");
+            auto fov = makeFoveation(*settings);
+            rendererCI.outputExtent = fov.outSize;
+            foveationShift[0] = fov.centerShiftX;
+            foveationShift[1] = fov.centerShiftY;
+            Info(
+                "Foveation: output %ux%u, shift %f %f\n",
+                fov.outSize.width, fov.outSize.height, fov.centerShiftX, fov.centerShiftY
+            );
+
+            pipeCIs.push_back(fov.info);
         }
 
         if (pipeCIs.empty()) {
@@ -123,7 +203,7 @@ public:
             });
             warpCapableChain = true;
         } else {
-            warpCapableChain = false;
+            warpCapableChain = settings->m_enableFoveatedEncoding;
         }
 
         outExtent = rendererCI.outputExtent;
@@ -262,7 +342,18 @@ private:
     // ones otherwise. Looked up and reported under the timestamp the frame is
     // sent with, which after a warp is the newest pose's, so the client
     // decodes the frame with the same centers it was encoded with.
-    void updateFoveationCenters(u64) { }
+    // Static centers, identical for both eyes because the right eye's X is
+    // already mirrored in the packed texture.
+    void updateFoveationCenters(u64) {
+        if (!Settings_Instance()->m_enableFoveatedEncoding) {
+            return;
+        }
+        auto& shifts = renderer.get().foveationCenterShifts;
+        shifts.left[0] = foveationShift[0];
+        shifts.left[1] = foveationShift[1];
+        shifts.right[0] = foveationShift[0];
+        shifts.right[1] = foveationShift[1];
+    }
 
 public:
     ~Encoder() {

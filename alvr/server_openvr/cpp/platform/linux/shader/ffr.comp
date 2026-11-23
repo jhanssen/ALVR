@@ -32,7 +32,23 @@ layout (push_constant) uniform PushConstants {
     uint enabled;
     layout (offset = 112) vec2 centerShiftLeft;
     layout (offset = 120) vec2 centerShiftRight;
+    layout (offset = 128) vec4 leftBounds;
+    vec4 rightBounds;
+    uint boundsEnabled;
 } pc;
+
+// Map a sample coordinate in the packed side-by-side texture into the valid
+// region the application submitted for that eye (uMin, vMin, uMax, vMax).
+vec2 ApplyBounds(vec2 st, bool isRightEye)
+{
+    if (pc.boundsEnabled == 0) {
+        return st;
+    }
+    vec4 b = isRightEye ? pc.rightBounds : pc.leftBounds;
+    float u = st.x * 2. - float(isRightEye);
+    vec2 m = vec2(mix(b.x, b.z, u), mix(b.y, b.w, st.y));
+    return vec2((m.x + float(isRightEye)) * .5, m.y);
+}
 
 // eyeUV must be in true left-to-right orientation (not the mirrored space
 // TextureToEyeUV produces for the right eye).
@@ -126,5 +142,5 @@ void main()
         sampleUV = clamp(sampleUV, lo, hi);
     }
 
-    imageStore(out_img, pos, texture(in_img, sampleUV));
+    imageStore(out_img, pos, texture(in_img, ApplyBounds(sampleUV, isRightEye)));
 }

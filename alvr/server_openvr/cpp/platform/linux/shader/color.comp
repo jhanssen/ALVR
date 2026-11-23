@@ -12,6 +12,25 @@ layout (constant_id = 4) const float saturation = 0.;
 layout (constant_id = 5) const float gamma = 0.;
 layout (constant_id = 6) const float sharpening = 0.;
 
+layout (push_constant) uniform PushConstants {
+    layout (offset = 128) vec4 leftBounds;
+    vec4 rightBounds;
+    uint boundsEnabled;
+} pc;
+
+// Map a sample coordinate in the packed side-by-side texture into the valid
+// region the application submitted for that eye (uMin, vMin, uMax, vMax).
+vec2 ApplyBounds(vec2 st, bool isRightEye)
+{
+    if (pc.boundsEnabled == 0) {
+        return st;
+    }
+    vec4 b = isRightEye ? pc.rightBounds : pc.leftBounds;
+    float u = st.x * 2. - float(isRightEye);
+    vec2 m = vec2(mix(b.x, b.z, u), mix(b.y, b.w, st.y));
+    return vec2((m.x + float(isRightEye)) * .5, m.y);
+}
+
 vec3 GetSharpenNeighborComponent(vec2 uv, float xoff, float yoff)
 {
     const float sharpenNeighbourWeight = -sharpening / 8.;
@@ -28,6 +47,7 @@ void main()
 {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     vec2 uv = (vec2(pos) + 0.5f) / imageSize(out_img);
+    uv = ApplyBounds(uv, uv.x > 0.5);
 
     const float DX = 1. / renderWidth;
     const float DY = 1. / renderHeight;

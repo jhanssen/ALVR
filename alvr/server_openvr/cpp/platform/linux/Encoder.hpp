@@ -292,6 +292,7 @@ public:
         u32 rightIdx,
         u64 targetTimestampNs,
         render::WarpParams const& warp,
+        render::TextureBounds const& bounds,
         int const waitFds[2]
     ) {
         if (!encoder) {
@@ -308,6 +309,7 @@ public:
             return;
         }
         renderer.get().warpParams = warp;
+        renderer.get().textureBounds = bounds;
         ReportPresent(targetTimestampNs, 0);
         updateFoveationCenters(targetTimestampNs);
         renderer.get().render(vkCtx, leftIdx, rightIdx, waitFds);

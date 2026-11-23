@@ -16,7 +16,23 @@ layout (push_constant) uniform Rewarp {
     vec4 leftTans;
     vec4 rightTans;
     uint enabled;
+    layout (offset = 128) vec4 leftBounds;
+    vec4 rightBounds;
+    uint boundsEnabled;
 } pc;
+
+// Map a sample coordinate in the packed side-by-side texture into the valid
+// region the application submitted for that eye (uMin, vMin, uMax, vMax).
+vec2 ApplyBounds(vec2 st, bool isRightEye)
+{
+    if (pc.boundsEnabled == 0) {
+        return st;
+    }
+    vec4 b = isRightEye ? pc.rightBounds : pc.leftBounds;
+    float u = st.x * 2. - float(isRightEye);
+    vec2 m = vec2(mix(b.x, b.z, u), mix(b.y, b.w, st.y));
+    return vec2((m.x + float(isRightEye)) * .5, m.y);
+}
 
 vec2 WarpEyeUV(vec2 eyeUV, bool isRightEye)
 {
@@ -32,8 +48,8 @@ void main()
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     vec2 npos = (vec2(pos) + 0.5f) / imageSize(out_img);
 
+    bool isRightEye = npos.x > 0.5;
     if (pc.enabled != 0) {
-        bool isRightEye = npos.x > 0.5;
         vec2 eyeUV = vec2(npos.x * 2. - float(isRightEye), npos.y);
         eyeUV = WarpEyeUV(eyeUV, isRightEye);
         // Repack into this eye's half of the shared texture, clamped half a
@@ -45,6 +61,6 @@ void main()
         npos = clamp(srcUV, lo, hi);
     }
 
-    vec4 res = texture(in_img, npos);
+    vec4 res = texture(in_img, ApplyBounds(npos, isRightEye));
     imageStore(out_img, pos, res);
 }

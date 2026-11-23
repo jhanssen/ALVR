@@ -728,9 +728,10 @@ void Renderer::render(VkContext& vkCtx, u32 leftIdx, u32 rightIdx, int const wai
 
     prev = stageOut;
 
-    PushConstants const pushConstants {
+    PushConstants pushConstants {
         .warp = warpParams,
         .centerShifts = foveationCenterShifts,
+        .bounds = textureBounds,
     };
 
     for (usize pipeIdx = 0; pipeIdx < pipes.size(); ++pipeIdx) {
@@ -764,6 +765,7 @@ void Renderer::render(VkContext& vkCtx, u32 leftIdx, u32 rightIdx, int const wai
             vk::PipelineStageFlagBits::eComputeShader
         );
 
+        pushConstants.bounds.enabled = pipeIdx == 0 ? 1 : 0;
         pipes[pipeIdx].render(
             vkCtx, cmdBuf, prev->view, nextOut->view, targetExtent, pushConstants
         );

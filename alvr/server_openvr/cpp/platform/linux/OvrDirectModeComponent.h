@@ -124,6 +124,7 @@ private:
         // m_framePoseRotation itself because the compositor thread has
         // overwritten it by then.
         vr::HmdQuaternion_t renderOrientation;
+        alvr::render::TextureBounds bounds;
         // Encoder-state generation this job was built against. The worker
         // discards the job if the generation moved (rebuild, shutdown, set
         // switch) between enqueue and processing.
@@ -134,6 +135,7 @@ private:
         int waitFds[2] = { -1, -1 };
         std::chrono::steady_clock::time_point enqueueTime;
     };
+    uint32_t m_lastLayerCount = 0;
     void EncodeWorkerLoop();
     // Drop a pending job. Call before any path that touches the encoder from
     // the compositor thread.

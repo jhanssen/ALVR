@@ -302,7 +302,9 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 }
             }
 
-            enc.present(job.leftIdx, job.rightIdx, stampTimestampNs, warpParams, job.waitFds);
+            enc.present(
+                job.leftIdx, job.rightIdx, stampTimestampNs, warpParams, job.bounds, job.waitFds
+            );
         } catch (std::exception const& e) {
             // An exception escaping a thread's start function is
             // std::terminate, which takes vrserver with it. Same recovery as
@@ -523,6 +525,7 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
 
 /** Submits queued layers for display. */
 void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
+    m_lastLayerCount = m_submitLayer;
     m_submitLayer = 0;
 
     switch (m_encoderState.load()) {
@@ -661,6 +664,29 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     job.rightIdx = rightIdx.value();
     job.targetTimestampNs = m_targetTimestampNs;
     job.renderOrientation = m_framePoseRotation;
+    for (int e = 0; e < 2; ++e) {
+        auto const& b = m_submitLayers[0][e].bounds;
+        float* dst = e == 0 ? job.bounds.left : job.bounds.right;
+        dst[0] = b.uMin;
+        dst[1] = b.vMin;
+        dst[2] = b.uMax;
+        dst[3] = b.vMax;
+    }
+    {
+        static auto lastLog = std::chrono::steady_clock::time_point {};
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastLog > std::chrono::seconds(2)) {
+            lastLog = now;
+            Info(
+                "Present: layers=%u tex=%llu/%llu L=(%.3f %.3f %.3f %.3f) R=(%.3f %.3f %.3f %.3f)\n",
+                m_lastLayerCount,
+                (unsigned long long)m_submitLayers[0][0].hTexture,
+                (unsigned long long)m_submitLayers[0][1].hTexture,
+                job.bounds.left[0], job.bounds.left[1], job.bounds.left[2], job.bounds.left[3],
+                job.bounds.right[0], job.bounds.right[1], job.bounds.right[2], job.bounds.right[3]
+            );
+        }
+    }
     job.generation = m_encGeneration;
     job.enqueueTime = std::chrono::steady_clock::now();
 

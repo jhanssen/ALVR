@@ -91,14 +91,26 @@ struct FoveationCenterShifts {
 };
 static_assert(sizeof(FoveationCenterShifts) == 16);
 
+// Valid region of each eye's submitted texture (uMin, vMin, uMax, vMax). A
+// flipped range (vMin > vMax) flips the image. Only the first pass applies it.
+struct TextureBounds {
+    float left[4] = { 0.f, 0.f, 1.f, 1.f };
+    float right[4] = { 0.f, 0.f, 1.f, 1.f };
+    uint32_t enabled = 0;
+    uint32_t pad[3] = {};
+};
+static_assert(sizeof(TextureBounds) == 48);
+
 // The push-constant range every pass shares. The warp sits at offset 0 so
 // quad.comp can declare only that prefix; ffr.comp declares the whole block
 // (centers at 112/120). Shaders that declare neither ignore it.
 struct PushConstants {
     WarpParams warp;
     FoveationCenterShifts centerShifts;
+    TextureBounds bounds;
 };
-static_assert(sizeof(PushConstants) == 128);
+static_assert(sizeof(PushConstants) == 176);
+static_assert(offsetof(PushConstants, bounds) == 128);
 static_assert(offsetof(PushConstants, centerShifts) == 112);
 
 namespace detail {
@@ -164,6 +176,7 @@ public:
     void render(VkContext& vkCtx, u32 leftIdx, u32 rightIdx, int const waitFds[2] = nullptr);
 
     WarpParams warpParams {};
+    TextureBounds textureBounds {};
 
     FoveationCenterShifts foveationCenterShifts {};
 

@@ -205,25 +205,6 @@ void Hmd::OnPoseUpdated(uint64_t targetTimestampNs, FfiDeviceMotion motion) {
     pose.vecPosition[1] = motion.position[1];
     pose.vecPosition[2] = motion.position[2];
 
-    {
-        static uint64_t last_log_ns = 0;
-        static uint64_t count = 0;
-        count++;
-        auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                          std::chrono::steady_clock::now().time_since_epoch()
-        )
-                          .count();
-        if (now_ns - last_log_ns > 1000000000ULL) {
-            last_log_ns = now_ns;
-            Info(
-                "Hmd::OnPoseUpdated: n=%llu ts=%llu q=(%f %f %f %f) p=(%f %f %f)\n",
-                (unsigned long long)count, (unsigned long long)targetTimestampNs,
-                motion.orientation.w, motion.orientation.x, motion.orientation.y,
-                motion.orientation.z, motion.position[0], motion.position[1], motion.position[2]
-            );
-        }
-    }
-
     this->submit_pose(pose);
 
     m_poseHistory->OnPoseUpdated(targetTimestampNs, motion);
@@ -308,21 +289,23 @@ void Hmd::SetViewsConfig(FfiViewsConfig config) {
         { -0.7853982f, 1.0471973f, 0.7853982f, -0.8726632f },
     };
 
+    // The visionOS client sends non-finite FOVs and a zero IPD until it streams.
+    static bool warned = false;
+    bool invalid = false;
     for (int eye = 0; eye < 2; eye++) {
-        const FfiFov& f = config.fov[eye];
-        Info(
-            "SetViewsConfig: eye %d fov l=%f r=%f u=%f d=%f ipd=%f\n",
-            eye, f.left, f.right, f.up, f.down, config.ipd_m
-        );
-        if (!fov_is_valid(f)) {
-            Warn("SetViewsConfig: eye %d fov invalid, using fallback\n", eye);
+        if (!fov_is_valid(config.fov[eye])) {
             config.fov[eye] = fallback_fov[eye];
+            invalid = true;
         }
     }
     if (!std::isfinite(config.ipd_m) || config.ipd_m <= 0.0f || config.ipd_m > 0.1f) {
-        Warn("SetViewsConfig: ipd %f invalid, using 0.063\n", config.ipd_m);
         config.ipd_m = 0.063f;
+        invalid = true;
     }
+    if (invalid && !warned) {
+        Warn("SetViewsConfig: invalid FOV or IPD from client, using fallback values\n");
+    }
+    warned = invalid;
 
     this->views_config = config;
 

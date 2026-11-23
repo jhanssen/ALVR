@@ -368,17 +368,6 @@ pub fn tracking_loop(
         };
 
         let timestamp = tracking.target_timestamp;
-        {
-            static DBG_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let n = DBG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if n % 90 == 0 {
-                alvr_common::info!(
-                    "Tracking packet #{n}: ts={timestamp:?} devices={:?}",
-                    tracking.device_motions.iter().map(|(id, _)| *id).collect::<Vec<_>>()
-                );
-            }
-        }
-
         if let Some(stats) = &mut *ctx.statistics_manager.write() {
             stats.report_tracking_received(timestamp);
         }

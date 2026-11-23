@@ -135,7 +135,6 @@ private:
         int waitFds[2] = { -1, -1 };
         std::chrono::steady_clock::time_point enqueueTime;
     };
-    uint32_t m_lastLayerCount = 0;
     void EncodeWorkerLoop();
     // Drop a pending job. Call before any path that touches the encoder from
     // the compositor thread.

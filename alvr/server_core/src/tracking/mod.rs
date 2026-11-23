@@ -354,13 +354,30 @@ pub fn tracking_loop(
         let data = match tracking_receiver.recv(STREAMING_RECV_TIMEOUT) {
             Ok(tracking) => tracking,
             Err(ConnectionError::TryAgain(_)) => continue,
-            Err(ConnectionError::Other(_)) => return,
+            Err(ConnectionError::Other(e)) => {
+                alvr_common::error!("Tracking receive loop exiting: {e:?}");
+                return;
+            }
         };
-        let Ok(mut tracking) = data.get_header() else {
-            return;
+        let mut tracking = match data.get_header() {
+            Ok(t) => t,
+            Err(e) => {
+                alvr_common::error!("Tracking packet decode failed, loop exiting: {e:?}");
+                return;
+            }
         };
 
         let timestamp = tracking.target_timestamp;
+        {
+            static DBG_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = DBG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n % 90 == 0 {
+                alvr_common::info!(
+                    "Tracking packet #{n}: ts={timestamp:?} devices={:?}",
+                    tracking.device_motions.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+                );
+            }
+        }
 
         if let Some(stats) = &mut *ctx.statistics_manager.write() {
             stats.report_tracking_received(timestamp);

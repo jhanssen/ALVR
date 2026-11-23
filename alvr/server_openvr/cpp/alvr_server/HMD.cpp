@@ -9,6 +9,8 @@
 #include "ViveTrackerProxy.h"
 #include "bindings.h"
 #include <cfloat>
+#include <chrono>
+#include <cmath>
 
 #ifdef _WIN32
 #include "platform/win32/CEncoder.h"
@@ -211,6 +213,25 @@ void Hmd::OnPoseUpdated(uint64_t targetTimestampNs, FfiDeviceMotion motion) {
     pose.vecPosition[1] = motion.position[1];
     pose.vecPosition[2] = motion.position[2];
 
+    {
+        static uint64_t last_log_ns = 0;
+        static uint64_t count = 0;
+        count++;
+        auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch()
+        )
+                          .count();
+        if (now_ns - last_log_ns > 1000000000ULL) {
+            last_log_ns = now_ns;
+            Info(
+                "Hmd::OnPoseUpdated: n=%llu ts=%llu q=(%f %f %f %f) p=(%f %f %f)\n",
+                (unsigned long long)count, (unsigned long long)targetTimestampNs,
+                motion.orientation.w, motion.orientation.x, motion.orientation.y,
+                motion.orientation.z, motion.position[0], motion.position[1], motion.position[2]
+            );
+        }
+    }
+
     this->submit_pose(pose);
 
     m_poseHistory->OnPoseUpdated(targetTimestampNs, motion);
@@ -278,8 +299,37 @@ void Hmd::StopStreaming() {
     vr::VRDriverInput()->UpdateBooleanComponent(m_proximity, false, 0.0);
 }
 
+static bool fov_is_valid(const FfiFov& f) {
+    const float lim = 1.5607963f; // just under pi/2
+    for (float v : { f.left, f.right, f.up, f.down }) {
+        if (!std::isfinite(v) || std::fabs(v) >= lim)
+            return false;
+    }
+    return f.left < f.right && f.down < f.up;
+}
+
 void Hmd::SetViewsConfig(FfiViewsConfig config) {
-    Debug("Hmd::SetViewsConfig");
+    // Fallback values match the visionOS client's defaults.
+    static const FfiFov fallback_fov[2] = {
+        { -1.0471973f, 0.7853982f, 0.7853982f, -0.8726632f },
+        { -0.7853982f, 1.0471973f, 0.7853982f, -0.8726632f },
+    };
+
+    for (int eye = 0; eye < 2; eye++) {
+        const FfiFov& f = config.fov[eye];
+        Info(
+            "SetViewsConfig: eye %d fov l=%f r=%f u=%f d=%f ipd=%f\n",
+            eye, f.left, f.right, f.up, f.down, config.ipd_m
+        );
+        if (!fov_is_valid(f)) {
+            Warn("SetViewsConfig: eye %d fov invalid, using fallback\n", eye);
+            config.fov[eye] = fallback_fov[eye];
+        }
+    }
+    if (!std::isfinite(config.ipd_m) || config.ipd_m <= 0.0f || config.ipd_m > 0.1f) {
+        Warn("SetViewsConfig: ipd %f invalid, using 0.063\n", config.ipd_m);
+        config.ipd_m = 0.063f;
+    }
 
     this->views_config = config;
 

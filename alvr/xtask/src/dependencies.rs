@@ -133,7 +133,7 @@ pub fn build_x264_linux(deps_path: &Path) {
         .unwrap();
 
     let nproc = cmd!(sh, "nproc").read().unwrap();
-    cmd!(sh, "make -j{nproc}").run().unwrap();
+    cmd!(sh, "make -j10").run().unwrap();
     cmd!(sh, "make install").run().unwrap();
 }
 
@@ -245,7 +245,7 @@ pub fn build_ffmpeg_linux(enable_nvenc: bool, deps_path: &Path) {
                 "--enable-nonfree",
                 "--enable-cuda-nvcc",
                 "--enable-libnpp",
-                "--nvccflags=\"-gencode arch=compute_52,code=sm_52 -O2\"",
+                "--nvccflags=\"-gencode arch=compute_75,code=sm_75 -O2\"",
                 &format!("--extra-cflags=\"{include_flags}\""),
                 &format!("--extra-ldflags=\"{link_flags}\""),
             ];
@@ -270,7 +270,7 @@ pub fn build_ffmpeg_linux(enable_nvenc: bool, deps_path: &Path) {
     }
 
     let nproc = cmd!(sh, "nproc").read().unwrap();
-    cmd!(sh, "make -j{nproc}").run().unwrap();
+    cmd!(sh, "make -j10").run().unwrap();
     cmd!(sh, "make install").run().unwrap();
 }
 

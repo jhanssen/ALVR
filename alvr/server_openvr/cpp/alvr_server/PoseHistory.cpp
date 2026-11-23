@@ -2,6 +2,7 @@
 #include "Logger.h"
 #include "Utils.h"
 #include "include/openvr_math.h"
+#include <chrono>
 #include <mutex>
 #include <optional>
 
@@ -42,6 +43,33 @@ void PoseHistory::OnPoseUpdated(uint64_t targetTimestampNs, FfiDeviceMotion moti
 std::optional<PoseHistory::TrackingHistoryFrame>
 PoseHistory::GetBestPoseMatch(const vr::HmdMatrix34_t& pose) const {
     std::unique_lock<std::mutex> lock(m_mutex);
+
+    // The Linux capture layer reports an all-zero pose when it can't locate the compositor's
+    // frame pose; matching against that is meaningless, so use the newest pose instead.
+    float norm = 0;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            norm += pose.m[j][i] * pose.m[j][i];
+        }
+    }
+    if (norm < 0.5f) {
+        if (m_poseBuffer.empty()) {
+            return {};
+        }
+        static uint64_t fb_n = 0, fb_last_ns = 0;
+        fb_n++;
+        auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch()
+        )
+                          .count();
+        if (now_ns - fb_last_ns > 1000000000ULL) {
+            Info("PoseMatch: zero pose from layer, using newest (n=%llu)\n", (unsigned long long)fb_n);
+            fb_last_ns = now_ns;
+            fb_n = 0;
+        }
+        return m_poseBuffer.back();
+    }
+
     float minDiff = 100000;
     auto minIt = m_poseBuffer.begin();
     for (auto it = m_poseBuffer.begin(); it != m_poseBuffer.end(); ++it) {
@@ -61,6 +89,27 @@ PoseHistory::GetBestPoseMatch(const vr::HmdMatrix34_t& pose) const {
         }
     }
     if (minIt != m_poseBuffer.end()) {
+        static uint64_t dbg_n = 0, dbg_last_ns = 0, dbg_max_age = 0, dbg_sum_age = 0;
+        static float dbg_max_dist = 0;
+        uint64_t age = m_poseBuffer.back().targetTimestampNs - minIt->targetTimestampNs;
+        dbg_n++;
+        dbg_sum_age += age;
+        if (age > dbg_max_age) dbg_max_age = age;
+        if (minDiff > dbg_max_dist) dbg_max_dist = minDiff;
+        auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch()
+        )
+                          .count();
+        if (now_ns - dbg_last_ns > 1000000000ULL) {
+            Info(
+                "PoseMatch: n=%llu buf=%zu avg_age_ms=%.1f max_age_ms=%.1f max_dist=%g\n",
+                (unsigned long long)dbg_n, m_poseBuffer.size(),
+                dbg_n ? dbg_sum_age / 1e6 / dbg_n : 0.0, dbg_max_age / 1e6, dbg_max_dist
+            );
+            dbg_last_ns = now_ns;
+            dbg_n = dbg_sum_age = dbg_max_age = 0;
+            dbg_max_dist = 0;
+        }
         return *minIt;
     }
 

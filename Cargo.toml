@@ -32,3 +32,6 @@ strip = false
 [profile.distribution]
 inherits = "release"
 lto = true
+
+[patch.crates-io]
+libspa-sys = { path = "/tmp/claude-1000/-home-jhanssen/0b784dd1-d29f-410c-84c9-5546248a8049/scratchpad/alvrsrc/patched/libspa-sys" }

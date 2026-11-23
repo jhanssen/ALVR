@@ -223,13 +223,31 @@ void CEncoder::Run() {
 
         fprintf(stderr, "CEncoder starting to read present packets");
         present_packet frame_info;
+        uint64_t dbg_packets = 0, dbg_no_pose = 0, dbg_encoded = 0, dbg_last_ns = 0;
+        auto dbg_log = [&]() {
+            auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch()
+            )
+                              .count();
+            if (now_ns - dbg_last_ns > 1000000000ULL) {
+                dbg_last_ns = now_ns;
+                Info(
+                    "CEncoder: packets=%llu no_pose=%llu encoded=%llu\n",
+                    (unsigned long long)dbg_packets, (unsigned long long)dbg_no_pose,
+                    (unsigned long long)dbg_encoded
+                );
+            }
+        };
         while (not m_exiting) {
             read_latest(client, (char*)&frame_info, sizeof(frame_info), m_exiting);
+            dbg_packets++;
+            dbg_log();
 
             encode_pipeline->SetParams(GetDynamicEncoderParams());
 
             auto pose = m_poseHistory->GetBestPoseMatch((const vr::HmdMatrix34_t&)frame_info.pose);
             if (!pose) {
+                dbg_no_pose++;
                 continue;
             }
 
@@ -292,6 +310,7 @@ void CEncoder::Run() {
             ParseFrameNals(
                 encode_pipeline->GetCodec(), packet.data, packet.size, packet.pts, packet.isIDR
             );
+            dbg_encoded++;
         }
     } catch (std::exception& e) {
         std::stringstream err;
